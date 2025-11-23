@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roteirização Interativa (Clarke & Wright)</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; background-color: #f4f4f9; }
+        h2 { margin-top: 0; color: #333; }
+        
+        /* Layout Principal */
+        .container { display: flex; flex: 1; gap: 20px; height: 100%; }
+        .sidebar { width: 300px; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; }
+        .graph-area { flex: 1; border: 1px solid #ddd; background: white; border-radius: 8px; position: relative; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        #mynetwork { width: 100%; height: 100%; }
+
+        /* Controles */
+        .card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9em; }
+        input[type="number"], input[type="text"] { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { width: 100%; padding: 10px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; font-size: 1em; transition: background 0.3s; }
+        button:hover { background-color: #0056b3; }
+        button.secondary { background-color: #6c757d; margin-top: 5px; }
+        button.secondary:hover { background-color: #545b62; }
+
+        /* Resultados */
+        #results { font-size: 0.9em; }
+        .route-item { margin-bottom: 10px; padding: 10px; border-left: 4px solid #007bff; background: #f8f9fa; }
+        .route-header { font-weight: bold; display: flex; justify-content: space-between; }
+        .route-seq { margin-top: 5px; color: #555; }
+
+        /* Modal Customizado */
+        #custom-modal { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 8px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); z-index: 1000; width: 300px; }
+        #modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; }
+        
+        .instructions { font-size: 0.8em; color: #666; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="sidebar">
+            <div class="card">
+                <h2>Configurações</h2>
+                <label for="vehicle-capacity">Capacidade do Veículo:</label>
+                <input type="number" id="vehicle-capacity" value="25" min="1">
+                
+                <div class="instructions">
+                    <strong>Como usar:</strong>
+                    <ul>
+                        <li><strong>Add Nó:</strong> Clique em "Editar" e depois no canvas. O primeiro nó criado será o Depósito (Vermelho).</li>
+                        <li><strong>Add Aresta:</strong> Arraste de um nó para outro.</li>
+                        <li><strong>Grafo Completo:</strong> Todos os nós devem estar conectados entre si para o algoritmo funcionar.</li>
+                    </ul>
+                </div>
+                
+                <button onclick="solveRoute()">Calcular Rotas</button>
+                <button class="secondary" onclick="clearGraph()">Limpar Grafo</button>
+            </div>
+
+            <div class="card" id="results-card" style="display:none;">
+                <h3>Resultados</h3>
+                <div id="results"></div>
+            </div>
+        </div>
+
+        <div class="graph-area">
+            <div id="mynetwork"></div>
+        </div>
+    </div>
+
+    <div id="modal-overlay"></div>
+    <div id="custom-modal">
+        <h3 id="modal-title">Editar</h3>
+        <div id="modal-content">
+            </div>
+        <div style="margin-top: 15px; display: flex; gap: 10px;">
+            <button onclick="saveModalData()" id="btn-save">Salvar</button>
+            <button onclick="closeModal()" class="secondary">Cancelar</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Inicialização do Vis.js ---
+        var nodes = new vis.DataSet([]);
+        var edges = new vis.DataSet([]);
+        var container = document.getElementById('mynetwork');
+        
+        var data = { nodes: nodes, edges: edges };
+        
+        var options = {
+            manipulation: {
+                enabled: true,
+                initiallyActive: true,
+                addNode: function (data, callback) {
+                    showNodeModal(data, callback);
+                },
+                editNode: function (data, callback) {
+                    showNodeModal(data, callback); // Permite editar demanda/nome depois
+                },
+                addEdge: function (data, callback) {
+                    if (data.from == data.to) {
+                        alert("Não é permitido auto-loops neste problema.");
+                        callback(null);
+                        return;
+                    }
+                    // Checar se já existe aresta (grafo não direcionado)
+                    var existing = edges.get({
+                        filter: function (item) {
+                            return (item.from == data.from && item.to == data.to) || 
+                                   (item.from == data.to && item.to == data.from);
+                        }
+                    });
+                    if (existing.length > 0) {
+                        alert("Já existe uma conexão entre estes nós.");
+                        callback(null);
+                        return;
+                    }
+                    showEdgeModal(data, callback);
+                }
+            },
+            nodes: {
+                shape: 'circle',
+                font: { size: 16, color: '#000000' },
+                borderWidth: 2
+            },
+            edges: {
+                width: 2,
+                font: { align: 'top', size: 14, background: 'white' },
+                smooth: false // Linhas retas para representar distâncias melhor
+            },
+            physics: {
+                enabled: false // Desliga física para os nós ficarem onde o usuário colocar
+            }
+        };
+
+        var network = new vis.Network(container, data, options);
+
+        // --- Lógica de Modal Customizado ---
+        let currentCallback = null;
+        let currentData = null;
+
+        function showNodeModal(data, callback) {
+            currentData = data;
+            currentCallback = callback;
+            
+            // O primeiro nó (se a lista estiver vazia) será o depósito
+            const isDepot = nodes.length === 0 && !data.id; 
+            const title = isDepot ? "Novo Depósito (Nó Inicial)" : "Novo Cliente";
+            
+            document.getElementById('modal-title').innerText = title;
+            document.getElementById('modal-content').innerHTML = `
+                <label>ID / Nome:</label>
+                <input type="text" id="node-id" value="${data.label || (nodes.length + 1)}" placeholder="Ex: 1">
+                <label>Demanda:</label>
+                <input type="number" id="node-demand" value="${data.demand || 0}" min="0">
+            `;
+            
+            openModal();
+        }
+
+        function showEdgeModal(data, callback) {
+            currentData = data;
+            currentCallback = callback;
+            document.getElementById('modal-title').innerText = "Nova Conexão";
+            document.getElementById('modal-content').innerHTML = `
+                <label>Distância (Peso):</label>
+                <input type="number" id="edge-weight" value="1" min="1" step="any">
+            `;
+            openModal();
+        }
+
+        function saveModalData() {
+            // Verifica se é Nó ou Aresta
+            const idInput = document.getElementById('node-id');
+            const demandInput = document.getElementById('node-demand');
+            const weightInput = document.getElementById('edge-weight');
+
+            if (idInput) { // É um nó
+                currentData.id = idInput.value; // Vis.js usa 'id' internamente
+                currentData.label = idInput.value + `\n(D: ${demandInput.value})`;
+                currentData.demand = parseInt(demandInput.value);
+                
+                // Coloração: Primeiro nó (Depósito) vs Outros
+                if (nodes.length === 0 && !nodes.get(currentData.id)) {
+                    currentData.color = { background: '#ffcccc', border: '#ff0000' };
+                    currentData.title = "Depósito";
+                } else {
+                    currentData.color = { background: '#d4edda', border: '#28a745' };
+                    currentData.title = "Cliente";
+                }
+            } 
+            else if (weightInput) { // É uma aresta
+                currentData.label = weightInput.value;
+                currentData.weight = parseFloat(weightInput.value); // Guardar valor numérico
+            }
+
+            currentCallback(currentData);
+            closeModal();
+        }
+
+        function openModal() {
+            document.getElementById('modal-overlay').style.display = 'block';
+            document.getElementById('custom-modal').style.display = 'block';
+        }
+
+        function closeModal() {
+            document.getElementById('modal-overlay').style.display = 'none';
+            document.getElementById('custom-modal').style.display = 'none';
+            if (currentCallback) currentCallback = null;
+        }
+
+        // --- Lógica de Negócio e Envio para API ---
+
+        async function solveRoute() {
+            const nodeList = nodes.get();
+            const edgeList = edges.get();
+
+            if (nodeList.length < 2) {
+                alert("Crie pelo menos o Depósito e 1 cliente.");
+                return;
+            }
+
+            // 1. Validar se o grafo é completo (Simplificado: avisa se tiver poucas arestas)
+            // Num grafo completo, arestas = n*(n-1)/2
+            const expectedEdges = (nodeList.length * (nodeList.length - 1)) / 2;
+            if (edgeList.length < expectedEdges) {
+                const confirm = window.confirm(`Atenção: O Grafo parece não estar completo.\nO algoritmo de Clarke & Wright exige distâncias entre TODOS os nós.\n\nArestas atuais: ${edgeList.length}\nEsperadas: ${expectedEdges}\n\nDeseja enviar mesmo assim? (Pode falhar se faltar caminhos)`);
+                if (!confirm) return;
+            }
+
+            // 2. Construir JSON Nodes
+            
+            const jsonNodes = nodeList.map(n => ({
+                id: String(n.id),
+                demand: parseInt(n.demand)
+            }));
+
+            // 3. Construir Matriz de Distâncias
+            // Formato: "1": { "2": 2, "3": 1... }
+            const distanceMatrix = {};
+
+            // Inicializa objetos vazios
+            nodeList.forEach(n => distanceMatrix[n.id] = {});
+
+            edgeList.forEach(e => {
+                const from = String(e.from);
+                const to = String(e.to);
+                const dist = parseFloat(e.weight || e.label); // Fallback para label se weight falhar
+
+                // Grafo não direcionado, preenche os dois lados ou segue a lógica triangular
+                // O exemplo JSON usa lógica triangular superior (apenas "1": {"2":...}).
+                
+                // Preencher bidirecionalmente na matriz interna para garantir que qualquer ordem funcione
+                // mas para enviar o JSON, vou montar a estrutura aninhada padrão
+                distanceMatrix[from][to] = dist;
+                distanceMatrix[to][from] = dist;
+            });
+
+            // Limpa a matriz para ficar igual ao exemplo (opcional, mas limpo)
+            // Exemplo: Se temos 1 e 2. distanceMatrix tem "1":{"2":X} e "2":{"1":X}. 
+            // O JSON de exemplo tem "1": {"2": X ...}
+            
+            const payload = {
+                vehicle_capacity: parseInt(document.getElementById('vehicle-capacity').value),
+                nodes: jsonNodes,
+                distance_matrix: distanceMatrix
+            };
+
+            console.log("Enviando:", JSON.stringify(payload, null, 2));
+
+            try {
+                const response = await fetch('/solve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error("Erro na API");
+                
+                const routes = await response.json();
+                displayResults(routes);
+                visualizeRoutes(routes);
+
+            } catch (error) {
+                alert("Erro ao calcular rota: " + error.message);
+                console.error(error);
+            }
+        }
+
+        // --- Visualização dos Resultados ---
+
+        function displayResults(routes) {
+            const resDiv = document.getElementById('results');
+            document.getElementById('results-card').style.display = 'block';
+            resDiv.innerHTML = "";
+
+            routes.forEach((route, index) => {
+                const html = `
+                    <div class="route-item">
+                        <div class="route-header">
+                            <span>Rota ${index + 1}</span>
+                            <span>Dist: ${route.total_distance} | Carga: ${route.total_load}</span>
+                        </div>
+                        <div class="route-seq">
+                            ${route.sequence.join(' ➝ ')}
+                        </div>
+                    </div>
+                `;
+                resDiv.innerHTML += html;
+            });
+        }
+
+        function visualizeRoutes(routes) {
+            // Resetar cores das arestas
+            const allEdges = edges.get();
+            allEdges.forEach(e => {
+                e.color = { color: '#848484', opacity: 0.3 }; // Cinza claro para não utilizadas
+                e.width = 1;
+            });
+            edges.update(allEdges);
+
+            // Cores para rotas diferentes
+            const colors = ['#FF0000', '#0000FF', '#00CC00', '#FF8800', '#9900CC'];
+
+            routes.forEach((route, idx) => {
+                const color = colors[idx % colors.length];
+                const seq = route.sequence;
+
+                for (let i = 0; i < seq.length - 1; i++) {
+                    const from = seq[i];
+                    const to = seq[i+1];
+
+                    // Encontrar a aresta correspondente no Vis.js
+                    // Como o ID da aresta é interno do Vis, temos que buscar pelo from/to
+                    const edgeObj = edges.get({
+                        filter: function (item) {
+                            return (item.from == from && item.to == to) || 
+                                   (item.from == to && item.to == from);
+                        }
+                    });
+
+                    if (edgeObj.length > 0) {
+                        // Atualiza a aresta para a cor da rota
+                        edges.update({
+                            id: edgeObj[0].id,
+                            color: { color: color, opacity: 1 },
+                            width: 4
+                        });
+                    } else {
+                        // Se a rota da API retornou uma conexão que não foi desenhada visualmente
+                        console.warn(`Aresta sugerida pela rota não existe no visual: ${from} -> ${to}`);
+                    }
+                }
+            });
+        }
+
+        function clearGraph() {
+            if(confirm('Apagar todo o grafo?')) {
+                nodes.clear();
+                edges.clear();
+                document.getElementById('results').innerHTML = '';
+                document.getElementById('results-card').style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
